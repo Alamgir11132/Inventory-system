@@ -1,0 +1,432 @@
+// App.js
+import React, { useState, useEffect } from 'react';
+import { View, Text, TextInput, Button, ScrollView, StyleSheet, Alert, ActivityIndicator, TouchableOpacity } from 'react-native';
+import SignatureScreen from 'react-native-signature-canvas';
+import { Table, Row, Rows } from 'react-native-table-component';
+import firestore from '@react-native-firebase/firestore';
+import moment from 'moment';
+import RNFS from 'react-native-fs';
+import { captureRef } from 'react-native-view-shot';
+import XLSX from 'xlsx';
+import FileViewer from 'react-native-file-viewer';
+
+const OrderSlipApp = () => {
+  // State management
+  const [name, setName] = useState('');
+  const [headcount, setHeadcount] = useState('1');
+  const [signature, setSignature] = useState(null);
+  const [orders, setOrders] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState('newOrder');
+  const [exporting, setExporting] = useState(false);
+  
+  // Generate unique order code
+  const generateOrderCode = () => {
+    const timestamp = moment().format('YYMMDDHHmmss');
+    return `ORD-${timestamp}`;
+  };
+
+  // Save order to Firebase
+  const saveOrder = async () => {
+    if (!name || !headcount || !signature) {
+      Alert.alert('غلطی', 'براہ کرم تمام فیلڈز بھریں');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const orderData = {
+        code: generateOrderCode(),
+        name,
+        date: moment().format('YYYY-MM-DD'),
+        time: moment().format('HH:mm'),
+        headcount: parseInt(headcount),
+        signature,
+        createdAt: firestore.FieldValue.serverTimestamp()
+      };
+
+      await firestore().collection('orders').add(orderData);
+      
+      Alert.alert('کامیابی', 'آرڈر کامیابی سے محفوظ ہو گیا!');
+      setName('');
+      setHeadcount('1');
+      setSignature(null);
+      fetchOrders();
+    } catch (error) {
+      Alert.alert('غلطی', 'آرڈر محفوظ کرنے میں ناکامی');
+      console.error(error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch orders from Firebase
+  const fetchOrders = async () => {
+    setLoading(true);
+    try {
+      const snapshot = await firestore()
+        .collection('orders')
+        .orderBy('createdAt', 'desc')
+        .get();
+      
+      const ordersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setOrders(ordersData);
+    } catch (error) {
+      Alert.alert('غلطی', 'آرڈرز لوڈ کرنے میں ناکامی');
+      console.error(error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Handle signature capture
+  const handleSignature = signature => {
+    setSignature(signature);
+  };
+
+  // Fetch orders on component mount
+  useEffect(() => {
+    fetchOrders();
+  }, []);
+
+  // Generate PDF
+  const generatePDF = async (order) => {
+    try {
+      const pdfPath = `${RNFS.DocumentDirectoryPath}/${order.code}.pdf`;
+      const htmlContent = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <title>Order Slip</title>
+          <style>
+            body { font-family: Arial; margin: 20px; }
+            .header { text-align: center; margin-bottom: 20px; }
+            .section { margin-bottom: 15px; }
+            .label { font-weight: bold; }
+            .signature { margin-top: 50px; border-top: 1px solid #000; width: 300px; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1>FFC MANAGEMENT CLUB</h1>
+            <h2>ORDER SLIP</h2>
+          </div>
+          
+          <div class="section">
+            <span class="label">نام:</span> ${order.name}
+          </div>
+          
+          <div class="section">
+            <span class="label">تاریخ:</span> ${order.date}
+          </div>
+          
+          <div class="section">
+            <span class="label">وقت:</span> ${order.time}
+          </div>
+          
+          <div class="section">
+            <span class="label">کوڈ:</span> ${order.code}
+          </div>
+          
+          <div class="section">
+            <span class="label">تعداد افراد:</span> ${order.headcount}
+          </div>
+          
+          <div class="section">
+            <span class="label">دستخط:</span>
+            <div><img src="${order.signature}" width="300" /></div>
+          </div>
+        </body>
+        </html>
+      `;
+
+      await RNFS.writeFile(pdfPath, htmlContent, 'utf8');
+      Alert.alert('PDF تیار', `آرڈر سلپ محفوظ ہو گئی: ${pdfPath}`);
+      FileViewer.open(pdfPath);
+    } catch (error) {
+      Alert.alert('غلطی', 'PDF بنانے میں ناکامی');
+      console.error(error);
+    }
+  };
+
+  // Export to Excel
+  const exportToExcel = async () => {
+    setExporting(true);
+    try {
+      const data = [
+        ['کوڈ', 'نام', 'تاریخ', 'وقت', 'تعداد افراد'],
+        ...orders.map(order => [
+          order.code,
+          order.name,
+          order.date,
+          order.time,
+          order.headcount.toString()
+        ])
+      ];
+      
+      const ws = XLSX.utils.aoa_to_sheet(data);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'آرڈرز');
+      
+      const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
+      const filePath = `${RNFS.DocumentDirectoryPath}/orders_${moment().format('YYYYMMDD')}.xlsx`;
+      
+      await RNFS.writeFile(filePath, wbout, 'base64');
+      Alert.alert('ایکسل فائل تیار', `فائل محفوظ ہو گئی: ${filePath}`);
+      FileViewer.open(filePath);
+    } catch (error) {
+      Alert.alert('غلطی', 'ایکسل فائل بنانے میں ناکامی');
+      console.error(error);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // Render UI
+  return (
+    <View style={styles.container}>
+      {/* Tabs */}
+      <View style={styles.tabContainer}>
+        <TouchableOpacity 
+          style={[styles.tabButton, activeTab === 'newOrder' && styles.activeTab]}
+          onPress={() => setActiveTab('newOrder')}
+        >
+          <Text style={styles.tabText}>نیا آرڈر</Text>
+        </TouchableOpacity>
+        
+        <TouchableOpacity 
+          style={[styles.tabButton, activeTab === 'viewOrders' && styles.activeTab]}
+          onPress={() => setActiveTab('viewOrders')}
+        >
+          <Text style={styles.tabText}>آرڈرز دیکھیں</Text>
+        </TouchableOpacity>
+      </View>
+
+      {loading && <ActivityIndicator size="large" color="#3498db" style={styles.loader} />}
+
+      {/* New Order Form */}
+      {activeTab === 'newOrder' && (
+        <ScrollView contentContainerStyle={styles.form}>
+          <Text style={styles.label}>مکمل نام:</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="اپنا نام درج کریں"
+            value={name}
+            onChangeText={setName}
+          />
+
+          <Text style={styles.label}>افراد کی تعداد:</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="تعداد درج کریں"
+            keyboardType="numeric"
+            value={headcount}
+            onChangeText={setHeadcount}
+          />
+
+          <Text style={styles.label}>دستخط:</Text>
+          <View style={styles.signatureContainer}>
+            <SignatureScreen
+              onOK={handleSignature}
+              descriptionText="یہاں دستخط کریں"
+              clearText="صاف کریں"
+              confirmText="محفوظ کریں"
+              webStyle={styles.signatureWeb}
+            />
+          </View>
+
+          <TouchableOpacity 
+            style={styles.saveButton}
+            onPress={saveOrder} 
+            disabled={loading}
+          >
+            <Text style={styles.buttonText}>آرڈر محفوظ کریں</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      )}
+
+      {/* Orders List */}
+      {activeTab === 'viewOrders' && (
+        <View style={styles.ordersContainer}>
+          <TouchableOpacity 
+            style={styles.refreshButton}
+            onPress={fetchOrders}
+          >
+            <Text style={styles.buttonText}>تازہ کریں</Text>
+          </TouchableOpacity>
+          
+          <TouchableOpacity 
+            style={styles.exportButton}
+            onPress={exportToExcel}
+            disabled={exporting}
+          >
+            <Text style={styles.buttonText}>
+              {exporting ? 'تیار ہو رہا ہے...' : 'ایکسل میں ڈاؤن لوڈ کریں'}
+            </Text>
+          </TouchableOpacity>
+          
+          {orders.length === 0 ? (
+            <Text style={styles.noOrders}>کوئی آرڈر نہیں ملا</Text>
+          ) : (
+            <ScrollView horizontal={true}>
+              <Table borderStyle={{borderWidth: 1, borderColor: '#c8e1ff'}}>
+                <Row 
+                  data={['کوڈ', 'نام', 'تاریخ', 'وقت', 'تعداد', 'اقدامات']} 
+                  style={styles.tableHead} 
+                  textStyle={styles.headerText}
+                />
+                <Rows 
+                  data={orders.map(order => [
+                    order.code,
+                    order.name,
+                    order.date,
+                    order.time,
+                    order.headcount.toString(),
+                    <TouchableOpacity 
+                      key={order.id} 
+                      style={styles.pdfButton}
+                      onPress={() => generatePDF(order)}
+                    >
+                      <Text style={styles.pdfButtonText}>PDF</Text>
+                    </TouchableOpacity>
+                  ])} 
+                  textStyle={styles.rowText}
+                />
+              </Table>
+            </ScrollView>
+          )}
+        </View>
+      )}
+    </View>
+  );
+};
+
+// Styles
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    padding: 20,
+    backgroundColor: '#f8f9fa'
+  },
+  tabContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginBottom: 20,
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    padding: 5,
+    elevation: 3
+  },
+  tabButton: {
+    padding: 15,
+    borderRadius: 8,
+    width: '45%',
+    alignItems: 'center'
+  },
+  activeTab: {
+    backgroundColor: '#3498db'
+  },
+  tabText: {
+    fontSize: 16,
+    fontWeight: 'bold'
+  },
+  form: {
+    flexGrow: 1,
+    paddingBottom: 30
+  },
+  ordersContainer: {
+    flex: 1
+  },
+  label: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginTop: 15,
+    marginBottom: 5,
+    color: '#2c3e50',
+    textAlign: 'right'
+  },
+  input: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#ced4da',
+    borderRadius: 8,
+    padding: 12,
+    fontSize: 16,
+    marginBottom: 15,
+    textAlign: 'right'
+  },
+  signatureContainer: {
+    height: 250,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#ced4da',
+    borderRadius: 8,
+    marginBottom: 20,
+    overflow: 'hidden'
+  },
+  signatureWeb: {
+    backgroundColor: '#fff'
+  },
+  saveButton: {
+    backgroundColor: '#2ecc71',
+    padding: 15,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 10
+  },
+  refreshButton: {
+    backgroundColor: '#9b59b6',
+    padding: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginBottom: 10
+  },
+  exportButton: {
+    backgroundColor: '#f39c12',
+    padding: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginBottom: 15
+  },
+  buttonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold'
+  },
+  noOrders: {
+    textAlign: 'center',
+    marginTop: 20,
+    fontSize: 16,
+    color: '#7f8c8d'
+  },
+  loader: {
+    marginVertical: 20
+  },
+  tableHead: {
+    height: 50,
+    backgroundColor: '#3498db'
+  },
+  headerText: {
+    margin: 10,
+    color: '#fff',
+    fontWeight: 'bold',
+    textAlign: 'center'
+  },
+  rowText: {
+    margin: 8,
+    textAlign: 'center'
+  },
+  pdfButton: {
+    backgroundColor: '#e74c3c',
+    padding: 5,
+    borderRadius: 5,
+    margin: 5
+  },
+  pdfButtonText: {
+    color: '#fff',
+    textAlign: 'center'
+  }
+});
+
+export default OrderSlipApp;
